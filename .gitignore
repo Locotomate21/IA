@@ -1,0 +1,19 @@
+#Python
+.venv/
+venv/
+_pycache/
+*.pyc
+
+# Enviroments variables
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
