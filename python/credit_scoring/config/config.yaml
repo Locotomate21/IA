@@ -1,0 +1,40 @@
+# Configuración del proyecto credit_scoring.
+# Los valores se pueden sobreescribir por CLI:
+#   python -m src.training.train training.epochs=50
+
+project:
+  name: credit_scoring
+  seed: 42
+
+paths:
+  dataset: ../../datasets/genia_services_csv_german_credit_risk_v1.0.0_training_20250824.csv
+  artifacts: artifacts
+  models: models
+  reports: reports
+
+data:
+  target_column: risk
+  test_size: 0.2
+  val_size: 0.1
+  stratify: true
+
+model:
+  hidden_layers: [128, 64]
+  dropout_rate: 0.2
+  use_batch_norm: true
+  activation_fn: relu
+
+training:
+  epochs: 30
+  batch_size: 64
+  learning_rate: 0.001
+  optimizer: adam
+  early_stopping_patience: 5
+
+mlflow:
+  tracking_uri: file:./mlruns
+  experiment_name: credit_scoring
+
+server:
+  host: 0.0.0.0
+  port: 8000

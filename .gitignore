@@ -1,8 +1,12 @@
-#Python
+# Python
 .venv/
 venv/
-_pycache/
+__pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
 
 # Enviroments variables
 .env
@@ -13,7 +17,19 @@ _pycache/
 
 # IDE
 .vscode/
+.idea/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Datos versionados con DVC: se versiona el .dvc, nunca el dato
+/datasets/*
+!/datasets/*.dvc
+!/datasets/.gitignore
+!/datasets/README.md
+
+# Nota: las salidas de ejecucion (artifacts/, models/, mlruns/, reports/)
+# se ignoran desde el .gitignore que vive dentro de cada una de esas
+# carpetas, para que la estructura exista en el repositorio pero su
+# contenido nunca se versione.
