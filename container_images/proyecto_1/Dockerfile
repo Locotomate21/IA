@@ -6,14 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Dependencias primero para aprovechar la cache de capas
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Código y configuración
-COPY src/ ./src/
-COPY config/ ./config/
-
-EXPOSE 8000
-
-CMD ["python", "-m", "src.server.main"]
+CMD ["python"]
