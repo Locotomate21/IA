@@ -12,8 +12,8 @@ from typing import Dict, Any
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from training.model import CreditScoringModel
-from server.schemas import CreditRiskInput
+from python.credit_scoring.src.training.model import CreditScoringModel
+from python.credit_scoring.src.server.schemas import CreditRiskInput
 
 log.basicConfig(level=log.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 

@@ -64,9 +64,9 @@ if str(SERVICE_ROOT) not in sys.path:
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.append(str(PYTHON_ROOT))
 
-from src.processing.main import CreditDataPreprocessor
-from src.training.model import CreditScoringModel
-from shared.mlops.mlflow_utils import setup_mlflow_for_service
+from python.credit_scoring.src.processing.main import CreditDataPreprocessor
+from python.credit_scoring.src.training.model import CreditScoringModel
+from python.shared.mlops.mlflow_utils import setup_mlflow_for_service
 
 
 # ---------------------------------------------------------

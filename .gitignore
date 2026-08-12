@@ -29,6 +29,9 @@ Thumbs.db
 !/datasets/.gitignore
 !/datasets/README.md
 
+# Store centralizado de MLflow: estado generado, se recrea al entrenar
+/.mlflow/
+
 # Nota: las salidas de ejecucion (artifacts/, models/, mlruns/, reports/)
 # se ignoran desde el .gitignore que vive dentro de cada una de esas
 # carpetas, para que la estructura exista en el repositorio pero su

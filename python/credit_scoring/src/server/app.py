@@ -11,8 +11,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.server.schemas import CreditRiskInput, CreditRiskOutput
-from src.inference.predictor import predictor_instance
+from python.credit_scoring.src.server.schemas import CreditRiskInput, CreditRiskOutput
+from python.credit_scoring.src.inference.predictor import predictor_instance
 
 log.basicConfig(level=log.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
