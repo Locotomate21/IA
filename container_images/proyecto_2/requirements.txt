@@ -1,2 +1,0 @@
-# Dependencias de la imagen base del proyecto_2.
-# Fijar siempre la version: paquete==x.y.z
