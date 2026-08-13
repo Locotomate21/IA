@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Solo para entrenar: fuera de la imagen Docker
+PyYAML==6.0.2
+mlflow==3.1.4
+matplotlib==3.10.5
