@@ -36,3 +36,5 @@ Thumbs.db
 # se ignoran desde el .gitignore que vive dentro de cada una de esas
 # carpetas, para que la estructura exista en el repositorio pero su
 # contenido nunca se versione.
+mlruns/
+mlruns/
