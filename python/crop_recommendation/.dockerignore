@@ -1,0 +1,20 @@
+# Entornos y cache: la imagen instala sus propias dependencias
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Herramientas de desarrollo que no sirven en produccion
+tests/
+reports/
+mlruns/
+requirements_training.txt
+
+# Los ejemplos y el entrenamiento no forman parte del servicio de inferencia
+src/examples/
+src/training/train.py
+
+# Metadatos
+.git/
+.gitignore
+.pytest_cache/
