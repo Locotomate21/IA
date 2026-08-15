@@ -66,9 +66,7 @@ training_params:
   test_size: 0.2
   random_state: 42
 
-  # Solo 2 epocas: esta fase busca ver el circuito completo, no un buen
-  # modelo. En la fase 07 se sube y se anade early stopping.
-  epochs: 2
+  epochs: 100
   batch_size: 32
 
   optimizer:
@@ -80,9 +78,30 @@ training_params:
   loss_function:
     name: "CrossEntropyLoss"
 
+  # Baja el learning rate cuando la validacion deja de mejorar, para afinar
+  # con pasos mas pequenos en vez de seguir oscilando.
+  scheduler:
+    name: "ReduceLROnPlateau"
+    patience: 5
+    factor: 0.5
+
+  # Corta el entrenamiento si en 'patience' epocas la validacion no mejora
+  # al menos 'delta'. Evita seguir entrenando hacia el sobreajuste.
+  early_stopping:
+    patience: 10
+    delta: 0.001
+
 evaluation_params:
   metrics:
     - accuracy
     - precision_macro
     - recall_macro
     - f1_macro
+
+mlops_config:
+  # "local"  -> SQLite en IA/.mlflow/mlflow.db (train.py resuelve la ruta).
+  # "auto"   -> respeta la variable de entorno MLFLOW_TRACKING_URI.
+  # tambien admite una URL explicita de servidor MLflow.
+  tracking_uri: "local"
+  experiment_name: "ia/crop_recommendation/training"
+  run_name: "EXP_001-crop_recommendation-MLP-crop_v100-training"
