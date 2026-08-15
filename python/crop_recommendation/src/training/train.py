@@ -24,13 +24,24 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import joblib
+import matplotlib
 import mlflow
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
+matplotlib.use("Agg")  # sin ventana grafica: guardamos a archivo
+import matplotlib.pyplot as plt  # noqa: E402
+
+from sklearn.metrics import (  # noqa: E402
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -247,7 +258,7 @@ class CropModelTrainer:
         return total_loss / len(loader.dataset)
 
     @torch.no_grad()
-    def _evaluate(self, loader, model, criterion) -> Tuple[float, Dict[str, float]]:
+    def _evaluate(self, loader, model, criterion) -> Tuple[float, Dict[str, float], np.ndarray, np.ndarray]:
         model.eval()  # apaga dropout; BatchNorm usa lo aprendido
         total_loss = 0.0
         y_true, y_pred = [], []
@@ -271,7 +282,77 @@ class CropModelTrainer:
             "recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
             "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
         }
-        return total_loss / len(loader.dataset), metrics
+        return (
+            total_loss / len(loader.dataset),
+            metrics,
+            np.array(y_true),
+            np.array(y_pred),
+        )
+
+    # -- matriz de confusion ------------------------------------------------
+
+    def _confusion_report(self, y_true: np.ndarray, y_pred: np.ndarray) -> Path:
+        """
+        Guarda la matriz de confusión y señala los pares peor distinguidos.
+
+        Aquí se comprueba la predicción del EDA: los cultivos con perfiles de
+        suelo y clima parecidos deberían ser justamente los que el modelo
+        mezcla. Si coinciden, el modelo está aprendiendo la estructura real
+        de los datos y no fallando al azar.
+        """
+        clases = self.model_cfg["classes"]
+        cm = confusion_matrix(y_true, y_pred, labels=range(len(clases)))
+
+        reports_dir = SERVICE_ROOT / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        salida = reports_dir / f"{Path(self.model_cfg['model_name']).stem}_confusion_matrix.png"
+
+        fig, ax = plt.subplots(figsize=(11, 9.5))
+        im = ax.imshow(cm, cmap="Greens")
+        fig.colorbar(im, ax=ax, shrink=0.8, label="Muestras")
+
+        ax.set_xticks(range(len(clases)))
+        ax.set_yticks(range(len(clases)))
+        ax.set_xticklabels(clases, rotation=90, fontsize=8)
+        ax.set_yticklabels(clases, fontsize=8)
+        ax.set_xlabel("Predicho")
+        ax.set_ylabel("Real")
+        ax.set_title(
+            f"Matriz de confusión — {self.config['project_info']['experiment_id']}\n"
+            f"accuracy = {accuracy_score(y_true, y_pred):.4f}"
+        )
+
+        # Solo anotamos las celdas con algo dentro: 484 números serían ilegibles.
+        for i in range(len(clases)):
+            for j in range(len(clases)):
+                if cm[i, j] > 0:
+                    ax.text(
+                        j, i, cm[i, j],
+                        ha="center", va="center", fontsize=7,
+                        color="white" if cm[i, j] > cm.max() / 2 else "black",
+                    )
+
+        fig.tight_layout()
+        fig.savefig(salida, dpi=140)
+        plt.close(fig)
+
+        # Los errores: celdas fuera de la diagonal.
+        errores = [
+            (clases[i], clases[j], int(cm[i, j]))
+            for i in range(len(clases))
+            for j in range(len(clases))
+            if i != j and cm[i, j] > 0
+        ]
+        errores.sort(key=lambda e: e[2], reverse=True)
+
+        if errores:
+            log.info("--- Confusiones (real -> predicho) ---")
+            for real, predicho, n in errores[:8]:
+                log.info(f"  {n:3d}  {real} -> {predicho}")
+        else:
+            log.info("--- Sin confusiones: clasificación perfecta ---")
+
+        return salida
 
     # -- MLflow -------------------------------------------------------------
 
@@ -358,7 +439,7 @@ class CropModelTrainer:
 
             for epoch in range(1, epochs + 1):
                 train_loss = self._train_one_epoch(train_loader, model, criterion, optimizer)
-                val_loss, metrics = self._evaluate(val_loader, model, criterion)
+                val_loss, metrics, _, _ = self._evaluate(val_loader, model, criterion)
 
                 scheduler.step(val_loss)
                 lr_actual = optimizer.param_groups[0]["lr"]
@@ -407,7 +488,9 @@ class CropModelTrainer:
                 model.load_state_dict(best_state)
                 log.info(f"Restaurados los pesos de la época {best_epoch} (val_loss={best_val_loss:.4f})")
 
-            final_loss, final_metrics = self._evaluate(val_loader, model, criterion)
+            final_loss, final_metrics, y_true, y_pred = self._evaluate(
+                val_loader, model, criterion
+            )
             mlflow.log_metrics({f"final_{k}": v for k, v in final_metrics.items()})
             mlflow.log_metric("final_val_loss", final_loss)
             mlflow.log_metric("best_epoch", best_epoch)
@@ -415,6 +498,10 @@ class CropModelTrainer:
             log.info("--- Resultado final ---")
             for nombre, valor in final_metrics.items():
                 log.info(f"  {nombre:<18} {valor:.4f}")
+
+            cm_path = self._confusion_report(y_true, y_pred)
+            mlflow.log_artifact(str(cm_path), artifact_path="reports")
+            log.info(f"Matriz de confusión: {cm_path.name}")
 
             self._save_artifacts(model)
 

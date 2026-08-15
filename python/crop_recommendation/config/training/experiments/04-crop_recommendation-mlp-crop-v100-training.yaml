@@ -1,0 +1,107 @@
+version: 1.0.0
+
+project_info:
+  service_name: "crop_recommendation"
+  workflow_type: "training"
+  experiment_id: "EXP-004"
+  stage: "mvp"
+  description: "Experimento 04: learning rate diez veces mayor."
+  tags:
+    - crop_recommendation
+    - mlp
+    - training
+    - tabular
+    - multiclass_classification
+
+environment:
+  device: "auto"
+  seed: 42
+
+data_source:
+  dataset_name: "crop_recommendation"
+  dataset_version: "v1.0.0"
+  # Ruta relativa a la raiz del servicio (python/crop_recommendation).
+  dataset_path: "../../datasets/ia_crop_recommendation_csv_crop_v1.0.0_training_20260812/crop_recommendation.csv"
+  preprocessor_filename: "crop_recommendation_preprocessor.joblib"
+  label_encoder_filename: "crop_recommendation_label_encoder.joblib"
+
+model_config:
+  model_name: "04_ia_mlp_crop_recommendation_model_v1.0.0_20260814.pt"
+  model_family: "mlp"
+  model_version: "v1.0.0"
+  task: "multiclass_classification"
+
+  architecture:
+    hidden_layers: [64, 32]
+    use_batch_norm: true
+    activation_fn: "ReLU"
+    dropout_rate: 0.2
+
+  # Los 22 cultivos, en el orden alfabetico que les asigna LabelEncoder.
+  classes:
+    - apple
+    - banana
+    - blackgram
+    - chickpea
+    - coconut
+    - coffee
+    - cotton
+    - grapes
+    - jute
+    - kidneybeans
+    - lentil
+    - maize
+    - mango
+    - mothbeans
+    - mungbean
+    - muskmelon
+    - orange
+    - papaya
+    - pigeonpeas
+    - pomegranate
+    - rice
+    - watermelon
+
+training_params:
+  test_size: 0.2
+  random_state: 42
+
+  epochs: 100
+  batch_size: 32
+
+  optimizer:
+    name: "Adam"
+    learning_rate: 0.01
+    weight_decay: 0.0001
+
+  # Sin ponderacion de clases: el dataset tiene 100 filas por cultivo.
+  loss_function:
+    name: "CrossEntropyLoss"
+
+  # Baja el learning rate cuando la validacion deja de mejorar, para afinar
+  # con pasos mas pequenos en vez de seguir oscilando.
+  scheduler:
+    name: "ReduceLROnPlateau"
+    patience: 5
+    factor: 0.5
+
+  # Corta el entrenamiento si en 'patience' epocas la validacion no mejora
+  # al menos 'delta'. Evita seguir entrenando hacia el sobreajuste.
+  early_stopping:
+    patience: 10
+    delta: 0.001
+
+evaluation_params:
+  metrics:
+    - accuracy
+    - precision_macro
+    - recall_macro
+    - f1_macro
+
+mlops_config:
+  # "local"  -> SQLite en IA/.mlflow/mlflow.db (train.py resuelve la ruta).
+  # "auto"   -> respeta la variable de entorno MLFLOW_TRACKING_URI.
+  # tambien admite una URL explicita de servidor MLflow.
+  tracking_uri: "local"
+  experiment_name: "ia/crop_recommendation/training"
+  run_name: "EXP_004-crop_recommendation-MLP-crop_v100-training"
