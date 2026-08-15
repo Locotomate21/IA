@@ -1,0 +1,551 @@
+"""
+Entrenamiento del MLP de recomendación de cultivos.
+
+Fase 07: entrenamiento real con early stopping, scheduler y registro en
+MLflow.
+
+    config YAML -> datos -> preprocesador -> modelo -> bucle -> artefactos
+                                                          |
+                                                       MLflow
+
+Ejecutar desde python/crop_recommendation:
+    python src/training/train.py --config config/training/experiments/01-crop_recommendation-mlp-crop-v100-training.yaml
+
+Ver los resultados:
+    mlflow ui --backend-store-uri sqlite:///../../.mlflow/mlflow.db
+"""
+
+import argparse
+import copy
+import logging
+import random
+import sys
+from pathlib import Path
+from typing import Dict, Tuple
+
+import joblib
+import matplotlib
+import mlflow
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import yaml
+
+matplotlib.use("Agg")  # sin ventana grafica: guardamos a archivo
+import matplotlib.pyplot as plt  # noqa: E402
+
+from sklearn.metrics import (  # noqa: E402
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, TensorDataset
+
+# Las dos raíces al path, para importar sin depender de PYTHONPATH:
+#   SERVICE_ROOT -> python/crop_recommendation  (para src.*)
+#   PYTHON_ROOT  -> python                      (para shared.*)
+SERVICE_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(SERVICE_ROOT))
+sys.path.insert(0, str(PYTHON_ROOT))
+
+from shared.mlops.mlflow_utils import setup_mlflow_for_service  # noqa: E402
+from src.processing.main import CropDataPreprocessor  # noqa: E402
+from src.training.model import CropRecommendationModel  # noqa: E402
+
+def _build_logger() -> logging.Logger:
+    """
+    Logger propio, aislado del global.
+
+    MLflow arranca alembic para migrar su base de datos, y alembic llama a
+    fileConfig(), que por defecto DESACTIVA los loggers ya existentes. Si
+    usáramos logging.basicConfig() sobre el logger raíz, todos los mensajes
+    de este archivo desaparecerían en cuanto MLflow se inicializara.
+
+    Con propagate=False y un handler propio, nuestra salida no depende de
+    lo que hagan otras librerías con la configuración global.
+    """
+    logger = logging.getLogger("crop_recommendation.training")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+log = _build_logger()
+
+
+# ---------------------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------------------
+
+
+def load_config(config_path: Path) -> Dict:
+    """Lee el YAML. Es la única fuente de verdad del experimento."""
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def set_seed(seed: int) -> None:
+    """
+    Fija las tres fuentes de aleatoriedad del proyecto.
+
+    Sin esto, dos ejecuciones idénticas darían resultados distintos y sería
+    imposible saber si una mejora vino de tu cambio o de la suerte.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def resolve_device(preference: str) -> torch.device:
+    if preference == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(preference)
+
+
+def resolve_tracking_uri(config: Dict) -> None:
+    """
+    Traduce tracking_uri: "local" a una ruta SQLite dentro del repo.
+
+    Existe porque "auto" cede la prioridad a la variable de entorno
+    MLFLOW_TRACKING_URI, que en esta máquina apunta a otro proyecto. Con
+    "local" el experimento se queda donde debe, sin depender del entorno.
+    """
+    mlops = config.setdefault("mlops_config", {})
+
+    if mlops.get("tracking_uri") != "local":
+        return
+
+    mlflow_dir = REPO_ROOT / ".mlflow"
+    mlflow_dir.mkdir(parents=True, exist_ok=True)
+    mlops["tracking_uri"] = f"sqlite:///{(mlflow_dir / 'mlflow.db').as_posix()}"
+
+
+# ---------------------------------------------------------------------------
+# Entrenador
+# ---------------------------------------------------------------------------
+
+
+class CropModelTrainer:
+    def __init__(self, config_path: Path) -> None:
+        self.config = load_config(config_path)
+        resolve_tracking_uri(self.config)
+
+        env = self.config["environment"]
+        self.seed = env["seed"]
+        self.device = resolve_device(env["device"])
+        set_seed(self.seed)
+
+        self.data_cfg = self.config["data_source"]
+        self.model_cfg = self.config["model_config"]
+        self.train_cfg = self.config["training_params"]
+
+        # Las rutas del YAML son relativas a la raíz del servicio.
+        self.dataset_path = (SERVICE_ROOT / self.data_cfg["dataset_path"]).resolve()
+        self.models_dir = SERVICE_ROOT / "models"
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+
+        self.preprocessor_helper = CropDataPreprocessor()
+
+        # Deja MLflow listo: tracking URI, experimento y tags.
+        self.mlflow_setup = setup_mlflow_for_service(
+            cfg=self.config,
+            current_file=__file__,
+            default_service_name="crop_recommendation",
+        )
+        # Por si alembic nos desactivó el logger durante la migración.
+        log.disabled = False
+
+        log.info("--- Configuración ---")
+        log.info(f"Servicio    : {self.config['project_info']['service_name']}")
+        log.info(f"Dataset     : {self.dataset_path}")
+        log.info(f"Modelos     : {self.models_dir}")
+        log.info(f"Dispositivo : {self.device}")
+        log.info(f"Semilla     : {self.seed}")
+        log.info(f"MLflow      : {self.mlflow_setup['tracking_uri']}")
+        log.info(f"Experimento : {self.mlflow_setup['experiment_name']}")
+
+    # -- datos --------------------------------------------------------------
+
+    def _load_and_split_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Carga el CSV y lo parte en entrenamiento y validación.
+
+        El corte se hace ANTES de preprocesar. Si escalaras primero, la media
+        incluiría las filas de validación y estarías filtrando información
+        que el modelo no debería conocer.
+        """
+        if not self.dataset_path.exists():
+            raise FileNotFoundError(f"No se encontró el dataset: {self.dataset_path}")
+
+        df = pd.read_csv(self.dataset_path)
+        log.info(f"Datos cargados: {df.shape}")
+
+        target = self.preprocessor_helper.target_feature
+
+        # stratify reparte cada cultivo proporcionalmente entre los dos
+        # conjuntos. Sin él, el azar podría dejar un cultivo fuera de
+        # validación y las métricas de esa clase serían indefinidas.
+        df_train, df_val = train_test_split(
+            df,
+            test_size=self.train_cfg["test_size"],
+            random_state=self.train_cfg["random_state"],
+            stratify=df[target],
+        )
+        log.info(f"Entrenamiento: {df_train.shape}  |  Validación: {df_val.shape}")
+        return df_train, df_val
+
+    def _build_dataloaders(
+        self, df_train: pd.DataFrame, df_val: pd.DataFrame
+    ) -> Tuple[DataLoader, DataLoader, int]:
+        """Preprocesa y empaqueta los datos en lotes."""
+        # El preprocesador se AJUSTA solo con entrenamiento...
+        preprocessor = self.preprocessor_helper.fit_preprocessor(df_train)
+
+        # ...y se APLICA a los dos conjuntos.
+        x_train, y_train = self.preprocessor_helper.process_data(df_train, preprocessor)
+        x_val, y_val = self.preprocessor_helper.process_data(df_val, preprocessor)
+
+        # CrossEntropyLoss espera las etiquetas como enteros long de forma
+        # (batch,), no como float de forma (batch, 1) como en el caso binario.
+        train_ds = TensorDataset(
+            torch.tensor(x_train, dtype=torch.float32),
+            torch.tensor(y_train.to_numpy(), dtype=torch.long),
+        )
+        val_ds = TensorDataset(
+            torch.tensor(x_val, dtype=torch.float32),
+            torch.tensor(y_val.to_numpy(), dtype=torch.long),
+        )
+
+        batch_size = self.train_cfg["batch_size"]
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+
+        log.info(
+            f"Lotes por época: {len(train_loader)} entrenamiento, {len(val_loader)} validación"
+        )
+
+        self._preprocessor = preprocessor
+        return train_loader, val_loader, x_train.shape[1]
+
+    # -- bucle --------------------------------------------------------------
+
+    def _train_one_epoch(self, loader, model, criterion, optimizer) -> float:
+        model.train()  # activa dropout y el modo lote de BatchNorm
+        total_loss = 0.0
+
+        for x_batch, y_batch in loader:
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
+
+            optimizer.zero_grad()               # 1. borra los gradientes anteriores
+            logits = model(x_batch)             # 2. hacia adelante
+            loss = criterion(logits, y_batch)   # 3. mide el error
+            loss.backward()                     # 4. hacia atrás: calcula gradientes
+            optimizer.step()                    # 5. ajusta los pesos
+
+            total_loss += loss.item() * x_batch.size(0)
+
+        return total_loss / len(loader.dataset)
+
+    @torch.no_grad()
+    def _evaluate(self, loader, model, criterion) -> Tuple[float, Dict[str, float], np.ndarray, np.ndarray]:
+        model.eval()  # apaga dropout; BatchNorm usa lo aprendido
+        total_loss = 0.0
+        y_true, y_pred = [], []
+
+        for x_batch, y_batch in loader:
+            x_batch = x_batch.to(self.device)
+            y_batch = y_batch.to(self.device)
+
+            logits = model(x_batch)
+            total_loss += criterion(logits, y_batch).item() * x_batch.size(0)
+
+            y_true.extend(y_batch.cpu().numpy())
+            y_pred.extend(logits.argmax(dim=1).cpu().numpy())
+
+        # average="macro": promedia la métrica de las 22 clases dándoles el
+        # mismo peso. zero_division=0 evita avisos si alguna clase no se
+        # predice nunca, cosa habitual en las primeras épocas.
+        metrics = {
+            "accuracy": accuracy_score(y_true, y_pred),
+            "precision_macro": precision_score(y_true, y_pred, average="macro", zero_division=0),
+            "recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
+            "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        }
+        return (
+            total_loss / len(loader.dataset),
+            metrics,
+            np.array(y_true),
+            np.array(y_pred),
+        )
+
+    # -- matriz de confusion ------------------------------------------------
+
+    def _confusion_report(self, y_true: np.ndarray, y_pred: np.ndarray) -> Path:
+        """
+        Guarda la matriz de confusión y señala los pares peor distinguidos.
+
+        Aquí se comprueba la predicción del EDA: los cultivos con perfiles de
+        suelo y clima parecidos deberían ser justamente los que el modelo
+        mezcla. Si coinciden, el modelo está aprendiendo la estructura real
+        de los datos y no fallando al azar.
+        """
+        clases = self.model_cfg["classes"]
+        cm = confusion_matrix(y_true, y_pred, labels=range(len(clases)))
+
+        reports_dir = SERVICE_ROOT / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        salida = reports_dir / f"{Path(self.model_cfg['model_name']).stem}_confusion_matrix.png"
+
+        fig, ax = plt.subplots(figsize=(11, 9.5))
+        im = ax.imshow(cm, cmap="Greens")
+        fig.colorbar(im, ax=ax, shrink=0.8, label="Muestras")
+
+        ax.set_xticks(range(len(clases)))
+        ax.set_yticks(range(len(clases)))
+        ax.set_xticklabels(clases, rotation=90, fontsize=8)
+        ax.set_yticklabels(clases, fontsize=8)
+        ax.set_xlabel("Predicho")
+        ax.set_ylabel("Real")
+        ax.set_title(
+            f"Matriz de confusión — {self.config['project_info']['experiment_id']}\n"
+            f"accuracy = {accuracy_score(y_true, y_pred):.4f}"
+        )
+
+        # Solo anotamos las celdas con algo dentro: 484 números serían ilegibles.
+        for i in range(len(clases)):
+            for j in range(len(clases)):
+                if cm[i, j] > 0:
+                    ax.text(
+                        j, i, cm[i, j],
+                        ha="center", va="center", fontsize=7,
+                        color="white" if cm[i, j] > cm.max() / 2 else "black",
+                    )
+
+        fig.tight_layout()
+        fig.savefig(salida, dpi=140)
+        plt.close(fig)
+
+        # Los errores: celdas fuera de la diagonal.
+        errores = [
+            (clases[i], clases[j], int(cm[i, j]))
+            for i in range(len(clases))
+            for j in range(len(clases))
+            if i != j and cm[i, j] > 0
+        ]
+        errores.sort(key=lambda e: e[2], reverse=True)
+
+        if errores:
+            log.info("--- Confusiones (real -> predicho) ---")
+            for real, predicho, n in errores[:8]:
+                log.info(f"  {n:3d}  {real} -> {predicho}")
+        else:
+            log.info("--- Sin confusiones: clasificación perfecta ---")
+
+        return salida
+
+    # -- MLflow -------------------------------------------------------------
+
+    def _log_params(self, num_features: int, model: nn.Module) -> None:
+        """Registra la configuración del experimento para poder compararlo."""
+        arch = self.model_cfg["architecture"]
+        opt = self.train_cfg["optimizer"]
+
+        mlflow.log_params(
+            {
+                "dataset_name": self.data_cfg["dataset_name"],
+                "dataset_version": self.data_cfg["dataset_version"],
+                "num_features": num_features,
+                "num_classes": len(self.model_cfg["classes"]),
+                "hidden_layers": arch["hidden_layers"],
+                "dropout_rate": arch["dropout_rate"],
+                "use_batch_norm": arch["use_batch_norm"],
+                "activation_fn": arch["activation_fn"],
+                "optimizer": opt["name"],
+                "learning_rate": opt["learning_rate"],
+                "weight_decay": opt["weight_decay"],
+                "batch_size": self.train_cfg["batch_size"],
+                "max_epochs": self.train_cfg["epochs"],
+                "early_stopping_patience": self.train_cfg["early_stopping"]["patience"],
+                "seed": self.seed,
+                "total_params": model.get_model_info()["total_params"],
+            }
+        )
+        # Los 22 nombres, para poder interpretar la matriz de confusión
+        # cuando se mire este run dentro de un mes.
+        mlflow.set_tag("classes", ", ".join(self.model_cfg["classes"]))
+
+    # -- orquestación -------------------------------------------------------
+
+    def train(self) -> None:
+        df_train, df_val = self._load_and_split_data()
+        train_loader, val_loader, num_features = self._build_dataloaders(df_train, df_val)
+
+        arch = self.model_cfg["architecture"]
+        num_classes = len(self.model_cfg["classes"])
+
+        model = CropRecommendationModel(
+            num_features=num_features,
+            num_classes=num_classes,
+            hidden_layers=arch["hidden_layers"],
+            dropout_rate=arch["dropout_rate"],
+            use_batch_norm=arch["use_batch_norm"],
+            activation_fn=arch["activation_fn"],
+        ).to(self.device)
+
+        log.info(f"Modelo creado: {model.get_model_info()}")
+
+        criterion = nn.CrossEntropyLoss()
+
+        opt_cfg = self.train_cfg["optimizer"]
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=opt_cfg["learning_rate"],
+            weight_decay=opt_cfg["weight_decay"],
+        )
+
+        sch_cfg = self.train_cfg["scheduler"]
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            patience=sch_cfg["patience"],
+            factor=sch_cfg["factor"],
+        )
+
+        es_cfg = self.train_cfg["early_stopping"]
+        epochs = self.train_cfg["epochs"]
+
+        # Estado del early stopping.
+        best_val_loss = float("inf")
+        best_state = None
+        best_epoch = 0
+        epochs_sin_mejora = 0
+
+        with mlflow.start_run(run_name=self.mlflow_setup["run_name"]):
+            mlflow.set_tags(self.mlflow_setup["standard_tags"])
+            self._log_params(num_features, model)
+
+            log.info(f"--- Entrenando hasta {epochs} épocas ---")
+
+            for epoch in range(1, epochs + 1):
+                train_loss = self._train_one_epoch(train_loader, model, criterion, optimizer)
+                val_loss, metrics, _, _ = self._evaluate(val_loader, model, criterion)
+
+                scheduler.step(val_loss)
+                lr_actual = optimizer.param_groups[0]["lr"]
+
+                mlflow.log_metrics(
+                    {
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                        "learning_rate": lr_actual,
+                        **metrics,
+                    },
+                    step=epoch,
+                )
+
+                # ¿Mejoró lo suficiente como para reiniciar la paciencia?
+                if val_loss < best_val_loss - es_cfg["delta"]:
+                    best_val_loss = val_loss
+                    best_epoch = epoch
+                    # Copia profunda: sin ella guardaríamos una referencia a
+                    # unos pesos que las épocas siguientes van a modificar.
+                    best_state = copy.deepcopy(model.state_dict())
+                    epochs_sin_mejora = 0
+                    marca = "*"
+                else:
+                    epochs_sin_mejora += 1
+                    marca = " "
+
+                if epoch % 5 == 0 or epoch <= 3 or marca == "*":
+                    log.info(
+                        f"Época {epoch:3d}/{epochs} {marca} "
+                        f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
+                        f"accuracy={metrics['accuracy']:.4f}  f1={metrics['f1_macro']:.4f}  "
+                        f"lr={lr_actual:.6f}"
+                    )
+
+                if epochs_sin_mejora >= es_cfg["patience"]:
+                    log.info(
+                        f"Early stopping en la época {epoch}: "
+                        f"{es_cfg['patience']} épocas sin mejorar."
+                    )
+                    break
+
+            # Nos quedamos con los MEJORES pesos, no con los últimos. Las
+            # épocas posteriores al mínimo empeoraron la validación.
+            if best_state is not None:
+                model.load_state_dict(best_state)
+                log.info(f"Restaurados los pesos de la época {best_epoch} (val_loss={best_val_loss:.4f})")
+
+            final_loss, final_metrics, y_true, y_pred = self._evaluate(
+                val_loader, model, criterion
+            )
+            mlflow.log_metrics({f"final_{k}": v for k, v in final_metrics.items()})
+            mlflow.log_metric("final_val_loss", final_loss)
+            mlflow.log_metric("best_epoch", best_epoch)
+
+            log.info("--- Resultado final ---")
+            for nombre, valor in final_metrics.items():
+                log.info(f"  {nombre:<18} {valor:.4f}")
+
+            cm_path = self._confusion_report(y_true, y_pred)
+            mlflow.log_artifact(str(cm_path), artifact_path="reports")
+            log.info(f"Matriz de confusión: {cm_path.name}")
+
+            self._save_artifacts(model)
+
+        log.info("--- Entrenamiento terminado ---")
+
+    def _save_artifacts(self, model: nn.Module) -> None:
+        """
+        Guarda las TRES piezas que la API necesitará, en disco y en MLflow.
+
+        Sin el preprocesador, los datos entrantes se escalarían con otros
+        números. Sin el codificador, la API devolvería 7 en vez de "coffee".
+        Un modelo solo no sirve para nada.
+        """
+        model_path = self.models_dir / self.model_cfg["model_name"]
+        prep_path = self.models_dir / self.data_cfg["preprocessor_filename"]
+        enc_path = self.models_dir / self.data_cfg["label_encoder_filename"]
+
+        torch.save(model.state_dict(), model_path)
+        joblib.dump(self._preprocessor, prep_path)
+        joblib.dump(self.preprocessor_helper.label_encoder, enc_path)
+
+        log.info("--- Artefactos guardados ---")
+        for p in (model_path, prep_path, enc_path):
+            log.info(f"  {p.name}  ({p.stat().st_size / 1024:.1f} KB)")
+            mlflow.log_artifact(str(p), artifact_path="model")
+
+
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Entrena el MLP de recomendación de cultivos.")
+    parser.add_argument("--config", type=str, required=True, help="Ruta al YAML del experimento.")
+    args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = (SERVICE_ROOT / config_path).resolve()
+
+    log.info(f"Config: {config_path}")
+
+    trainer = CropModelTrainer(config_path)
+    trainer.train()
+
+
+if __name__ == "__main__":
+    main()

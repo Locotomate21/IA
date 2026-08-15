@@ -37,4 +37,6 @@ Thumbs.db
 # carpetas, para que la estructura exista en el repositorio pero su
 # contenido nunca se versione.
 mlruns/
-mlruns/
+
+# Apuntes personales de aprendizaje: no se versionan
+/docs/
