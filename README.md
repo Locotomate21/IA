@@ -1,61 +1,83 @@
-# IA — genIA_services
+# IA — Servicios de Machine Learning
 
-Monorepo de servicios de IA. Cada proyecto vive aislado dentro de su stack
-(`python/`, `java/`), los datasets se versionan con DVC y las imágenes de
-contenedor se definen por proyecto en `container_images/`.
+Monorepo de servicios de ML llevados de punta a punta: del dataset al
+contenedor. Cada servicio vive aislado, con su propio entorno, sus
+dependencias y su imagen Docker.
 
-## Arquitectura
+## Servicios
+
+| Servicio | Tarea | Modelo | Estado |
+|----------|-------|--------|--------|
+| [crop_recommendation](python/crop_recommendation/) | Recomendar qué cultivo sembrar según suelo y clima | MLP multiclase, 22 clases | Funcionando · 99,77 % |
+
+## Estructura
 
 ```
-genIA_services/
-├── datasets/                 # punteros DVC a los datos versionados (no los datos)
-│   └── <proyecto>_<tipo>_<nombre>_<version>_<tarea>_<timestamp>.dvc
+IA/
+├── datasets/                 # punteros y datos versionados (no van a git)
+│   └── <proyecto>_<servicio>_<formato>_<nombre>_<version>_<tarea>_<fecha>/
 │
 ├── python/
-│   ├── credit_scoring/       # proyecto de scoring crediticio
-│   │   ├── .venv/            # entorno virtual (python 3.11, no versionado)
+│   ├── crop_recommendation/  # servicio de recomendación de cultivos
 │   │   ├── Dockerfile
-│   │   ├── requirements.txt
-│   │   ├── README.md
-│   │   ├── artifacts/        # salidas de entrenamiento (no versionado)
-│   │   ├── config/           # configuración declarativa (Hydra / OmegaConf)
-│   │   ├── mlruns/           # tracking local de MLflow (no versionado)
-│   │   ├── models/           # modelos serializados (no versionado)
-│   │   ├── reports/          # métricas, gráficas y reportes (no versionado)
-│   │   ├── tests/            # pruebas unitarias e integración
+│   │   ├── requirements.txt             # solo inferencia (va a la imagen)
+│   │   ├── requirements_training.txt    # entrenamiento y pruebas
+│   │   ├── config/training/experiments/ # un YAML por experimento
+│   │   ├── models/                      # artefactos generados
+│   │   ├── reports/                     # métricas y gráficas
+│   │   ├── tests/
 │   │   └── src/
-│   │       ├── examples/     # scripts de ejemplo / notebooks ejecutables
-│   │       ├── inference/    # carga de modelo y predicción
-│   │       ├── processing/   # ingesta, limpieza y feature engineering
-│   │       ├── server/       # API de servicio del modelo
-│   │       └── training/     # entrenamiento y evaluación
-│   └── project_2/
+│   │       ├── processing/   # preprocesamiento
+│   │       ├── training/     # modelo y entrenamiento
+│   │       ├── inference/    # carga de artefactos y predicción
+│   │       ├── server/       # API
+│   │       └── examples/     # análisis exploratorio
+│   │
+│   └── shared/mlops/         # utilidades comunes (MLflow)
 │
-├── java/                     # proyectos del stack Java
-│
-└── container_images/         # imágenes base compartidas por proyecto
-    ├── proyecto_1/
-    │   ├── Dockerfile
-    │   ├── requirements.txt
-    │   └── README.md
-    └── proyecto_2/
+└── .mlflow/                  # tracking local (no versionado)
 ```
 
 ## Convenciones
 
-- **Un proyecto = un entorno virtual.** El `.venv/` vive dentro de la carpeta del
-  proyecto y nunca se versiona.
-- **Código fuente bajo `src/`.** Las carpetas de datos y salidas (`artifacts/`,
-  `models/`, `mlruns/`, `reports/`) quedan fuera de `src/` y se ignoran en git;
-  cada una conserva su `.gitignore` para que la estructura sí exista en el repo.
-- **Datos por DVC.** En `datasets/` solo se versionan los archivos `.dvc`. Ver
-  [datasets/README.md](datasets/README.md) para la convención de nombres.
+**Un entorno por servicio.** El `.venv/` vive dentro de la carpeta del servicio
+y nunca se versiona. No hay entornos en la raíz: dos entornos activables se
+confunden con facilidad.
+
+**Dos archivos de dependencias.** `requirements.txt` contiene solo lo necesario
+para inferir y es lo único que entra en la imagen Docker.
+`requirements_training.txt` añade entrenamiento y pruebas. Esa separación
+mantiene la imagen ligera.
+
+**La configuración manda.** Cada experimento es un YAML en
+`config/training/experiments/`. Cambiar la arquitectura, el optimizador o los
+hiperparámetros no requiere tocar código.
+
+**Las salidas no se versionan.** `models/`, `reports/` y `mlruns/` llevan su
+propio `.gitignore` con `*` y `!.gitignore`: la estructura existe en el
+repositorio, el contenido nunca.
+
+**Los datos van aparte.** En `datasets/` la convención de nombres codifica
+proyecto, servicio, formato, dataset, versión, tarea y fecha. Ver
+[datasets/README.md](datasets/README.md).
 
 ## Puesta en marcha
 
 ```bash
-cd python/credit_scoring
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-pip install -r requirements.txt
+cd python/crop_recommendation
+py -3.11 -m venv .venv
+source .venv/Scripts/activate        # Git Bash
+python -m pip install -r requirements_training.txt
 ```
+
+Cada servicio documenta su uso en su propio README.
+
+## Atribución
+
+La arquitectura de este monorepo está basada en los materiales educativos de
+[inGeniia.co](https://www.ingeniia.co). El diseño original del servicio de
+Credit Scoring, del que parte esta estructura, fue desarrollado por el equipo
+de inGeniia.
+
+Los servicios de este repositorio son implementaciones propias sobre datasets
+distintos.
