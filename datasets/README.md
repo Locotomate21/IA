@@ -1,37 +1,61 @@
 # datasets
 
-Esta carpeta versiona **punteros DVC**, no los datos. Cada archivo `.dvc`
-referencia un dataset almacenado en el remoto de DVC; el archivo de datos real
-está ignorado por git.
+Los datos **no se versionan en git**. Esta carpeta los organiza en local y fija
+la convención de nombres; su contenido está ignorado salvo este README.
 
 ## Convención de nombres
 
-```
-<proyecto>_<tipo_de_archivo>_<nombre>_<version>_<tarea>_<timestamp>.dvc
-```
-
-| Campo             | Descripción                                  | Ejemplo              |
-| ----------------- | -------------------------------------------- | -------------------- |
-| `proyecto`        | Servicio o dominio dueño del dato            | `genia_services`     |
-| `tipo_de_archivo` | Formato en disco                             | `csv`, `parquet`     |
-| `nombre`          | Identificador del dataset                    | `german_credit_risk` |
-| `version`         | Versión semántica del dataset                | `v1.0.0`             |
-| `tarea`           | Uso previsto                                 | `training`, `eval`   |
-| `timestamp`       | Fecha de corte de los datos (`YYYYMMDD`)     | `20250824`           |
-
-Ejemplo:
+Cada dataset vive en una carpeta cuyo nombre codifica su procedencia:
 
 ```
-genia_services_csv_german_credit_risk_v1.0.0_training_20250824.dvc
+<proyecto>_<servicio>_<formato>_<nombre>_<version>_<tarea>_<fecha>/
 ```
 
-## Uso
+| Campo | Descripción | Ejemplo |
+| --- | --- | --- |
+| `proyecto` | Repositorio dueño del dato | `ia` |
+| `servicio` | Servicio que lo consume | `crop_recommendation` |
+| `formato` | Formato en disco | `csv`, `parquet` |
+| `nombre` | Identificador del dataset | `crop` |
+| `version` | Versión semántica | `v1.0.0` |
+| `tarea` | Uso previsto | `training`, `eval` |
+| `fecha` | Fecha de corte (`YYYYMMDD`) | `20260812` |
+
+En uso ahora mismo:
+
+```
+datasets/
+└── ia_crop_recommendation_csv_crop_v1.0.0_training_20260812/
+    └── crop_recommendation.csv
+```
+
+**Por qué el nombre va en la carpeta y no en el archivo.** Un dataset puede
+tener varios archivos —train/val/test, o miles de imágenes— y así la versión se
+declara una sola vez, sin riesgo de que se desincronice entre ellos.
+
+**Por qué el nombre es tan largo.** Cuando existan tres versiones del mismo
+dato, esa carpeta es la única forma de saber cuál entrenó qué modelo. Los YAML
+de experimento apuntan a ella por ruta completa.
+
+## Cómo obtener los datos
+
+Actualmente cada quien descarga el dataset y lo coloca siguiendo la convención.
+El de cultivos es *Crop Recommendation Dataset*, disponible en Kaggle.
+
+## Versionado con DVC
+
+**No está configurado todavía.** Si el proyecto crece hasta necesitarlo, el
+flujo sería:
 
 ```bash
-# registrar un dataset nuevo
-dvc add datasets/genia_services_csv_german_credit_risk_v1.0.0_training_20250824.csv
-git add datasets/*.dvc datasets/.gitignore
+dvc init
+dvc remote add -d storage <url-del-remoto>
 
-# recuperar los datos en otra máquina
-dvc pull
+dvc add datasets/ia_crop_recommendation_csv_crop_v1.0.0_training_20260812
+git add datasets/*.dvc datasets/.gitignore
+git commit -m "Versionar dataset de cultivos"
+dvc push
 ```
+
+A partir de ahí, `dvc pull` recupera los datos en cualquier máquina y git solo
+guarda los punteros `.dvc`, nunca los archivos.
